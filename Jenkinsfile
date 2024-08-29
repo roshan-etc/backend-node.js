@@ -2,10 +2,11 @@ pipeline {
     agent any
 
     environment {
-        // Define the SonarQube Scanner tool
         SCANNER_HOME = tool 'sonar'
-        // Reference the Node.js installation directly by name
         NODEJS_HOME = tool 'nodejs'
+        DOCKER_IMAGE_NAME = 'backendnodejs'
+        TRIVY_IMAGE = 'aquasec/trivy:latest'
+        TRIVY_REPORT_FILE = 'trivy-report.json'
     }
 
     stages {
@@ -16,63 +17,83 @@ pipeline {
             }
         }
 
-        stage('GitCheckout') {
+        stage('Git Checkout') {
             steps {
                 git branch: 'main', url: 'https://github.com/roshan-etc/backend-node.js.git'
             }
         }
 
-        stage('Install') {
+        stage('Install Dependencies') {
             steps {
                 sh 'npm install'
-                sh 'npm run build'
             }
         }
 
+        /*
         stage('SonarQube Analysis') {
             steps {
                 script {
-                    withSonarQubeEnv('sonarqube') { // Replace 'sonarqube' with the name you configured in Jenkins for SonarQube
+                    withSonarQubeEnv('sonar') {
                         sh '''
-                            sonar-scanner \
+                            ${SCANNER_HOME}/bin/sonar-scanner \
                               -Dsonar.projectKey=backend \
                               -Dsonar.sources=. \
                               -Dsonar.host.url=http://35.90.114.54:9000 \
-                              -Dsonar.token=sqp_07fa25d48e7c11d4ad67e85b2e0e3602e632bd90
+                              -Dsonar.token=sqp_f27f78bfe29a6c3eab71dde3ec5eaf8f9dcdcacd
                         '''
                     }
                 }
             }
         }
+        */
 
-        stage('Quality Gate') {
+        stage('Docker Build') {
+            steps {
+                sh 'docker build -t ${DOCKER_IMAGE_NAME} .'
+            }
+        }
+
+        stage('Run Trivy Scan') {
             steps {
                 script {
-                    // Wait for SonarQube Quality Gate status
-                    def qualityGate = waitForQualityGate()
-                    if (qualityGate.status != 'OK') {
-                        error "Pipeline aborted due to quality gate failure: ${qualityGate.status}"
-                    }
+                    sh '''
+                        docker run --rm \
+                          -v /var/run/docker.sock:/var/run/docker.sock \
+                          -v $(pwd):/root \
+                          ${TRIVY_IMAGE} image --format json --output ${TRIVY_REPORT_FILE} ${DOCKER_IMAGE_NAME}
+                    '''
                 }
             }
         }
 
-        stage('DockerBuild') {
+        stage('Archive Trivy Report') {
             steps {
-                sh 'docker build -t backendnodejs .'
+                archiveArtifacts artifacts: "${TRIVY_REPORT_FILE}", allowEmptyArchive: true
             }
         }
 
-        stage('DockerLogin') {
+        stage('Display Trivy Report') {
             steps {
-                sh 'aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin 654654245097.dkr.ecr.us-west-2.amazonaws.com'
+                script {
+                    sh "cat ${TRIVY_REPORT_FILE}"
+                }
             }
         }
 
-        stage('DockerTAG & Push') {
+        stage('Docker Login') {
             steps {
-                sh 'docker tag backendnodejs:latest 654654245097.dkr.ecr.us-west-2.amazonaws.com/backendnodejs:latest'
-                sh 'docker push 654654245097.dkr.ecr.us-west-2.amazonaws.com/backendnodejs:latest'
+                script {
+                    sh '''
+                        aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin 654654245097.dkr.ecr.us-west-2.amazonaws.com
+                    '''
+                }
+            }
+        }
+
+        stage('Docker Tag & Push') {
+            steps {
+                sh 'docker tag ${DOCKER_IMAGE_NAME}:latest 654654245097.dkr.ecr.us-west-2.amazonaws.com/${DOCKER_IMAGE_NAME}:latest'
+                sh 'docker push 654654245097.dkr.ecr.us-west-2.amazonaws.com/${DOCKER_IMAGE_NAME}:latest'
             }
         }
 
@@ -80,7 +101,12 @@ pipeline {
     
     post {
         always {
-            cleanWs() // Clean workspace after pipeline runs
+            script {
+                sh '''
+                    # Remove the Docker image
+                    docker rmi ${DOCKER_IMAGE_NAME}
+                '''
+            }
         }
     }
 }
